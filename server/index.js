@@ -43,14 +43,27 @@ const generateAuthUrl = (state = 'xyz123') => {
 let accessToken = null;
 let refreshToken = null;
 
-// CORS setup
-app.use(
-  cors({
-    origin: FRONTEND_URL || "http://localhost:5173",
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  })
-);
+// CORS setup - Simple configuration
+app.use((req, res, next) => {
+  // Allow all origins in development
+  res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+  
+  next();
+});
+
+// Log all requests for debugging
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+  next();
+});
 
 // Security headers (basic)
 app.use((req, res, next) => {
@@ -200,7 +213,88 @@ app.get("/generate-token", async (req, res) => {
   }
 });
 
-// 5️⃣ Health check
+// 5️⃣ Fetch user profile
+app.get("/api/profile", async (req, res) => {
+  const authHeader = req.headers.authorization;
+  
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Unauthorized - No token provided' });
+  }
+
+  const token = authHeader.split(' ')[1];
+  
+  try {
+    // For Fyers API v3, we need to include the app ID and a timestamp
+    const timestamp = Math.floor(Date.now() / 1000);
+    const requestId = `req_${timestamp}`;
+    
+    const profileResponse = await fetch('https://api-t1.fyers.in/api/v3/profile', {
+      method: 'GET',
+      headers: {
+        'Authorization': `${APP_ID}:${token}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'X-Fyers-App-Key': APP_ID,
+        'X-Fyers-Request-Id': requestId,
+        'X-Fyers-Timestamp': timestamp.toString(),
+        'X-Fyers-User-Agent': 'fyers-api-js/1.0.0'
+      }
+    });
+    
+    const responseData = await profileResponse.json();
+    
+    if (!profileResponse.ok || (responseData.s && responseData.s !== 'ok')) {
+      console.error('Profile API error:', {
+        status: profileResponse.status,
+        statusText: profileResponse.statusText,
+        errorData: responseData
+      });
+      throw new Error(responseData?.message || responseData?.error?.message || 'Failed to fetch profile');
+    }
+    
+    // Extract comprehensive profile and account information
+    const userData = responseData.data || responseData.profile || {};
+    const profile = {
+      // Basic Info
+      name: userData.name || userData.client_name,
+      email: userData.email_id || userData.email,
+      mobile: userData.mobile_no || userData.phone_number,
+      
+      // Account Details
+      clientId: userData.client_id || userData.fy_id,
+      pan: userData.pan || userData.pan_number,
+      accountStatus: userData.account_status || userData.status,
+      
+      // Additional Account Information
+      accountType: userData.account_type || userData.actype,
+      broker: userData.broker || 'FYERS',
+      
+      // Exchange Details
+      exchanges: userData.exchanges || [],
+      products: userData.products || [],
+      
+      // KYC Details
+      kycStatus: userData.kyc_status,
+      dob: userData.dob || userData.date_of_birth,
+      
+      // Last Login
+      lastLogin: userData.last_login,
+      
+      // Raw data for debugging (can be removed in production)
+      _raw: process.env.NODE_ENV !== 'production' ? userData : undefined
+    };
+    
+    res.json(profile);
+  } catch (error) {
+    console.error('[PROFILE ERROR]', error);
+    res.status(500).json({ 
+      error: 'Failed to fetch profile',
+      details: error.message 
+    });
+  }
+});
+
+// 6️⃣ Health check
 app.get("/", (req, res) => {
   res.send("Fyers backend is running!");
 });
